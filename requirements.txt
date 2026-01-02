@@ -1,0 +1,6 @@
+langchain
+langchain-google-genai
+langchain-community
+pymysql
+python-dotenv
+supabase
