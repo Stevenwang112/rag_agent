@@ -1,0 +1,109 @@
+[
+    {
+        "question": "What is the exact battery capacity (in kWh) and the corresponding CLTC range for the StarEra ES9 in its longest-range configuration?",
+        "reference_answer": "The StarEra ES9 is equipped with a 123.9 kWh battery pack, providing a CLTC range of 720 km.",
+        "key_facts": [
+            "123.9 kWh",
+            "720 km",
+            "CLTC",
+            "ES9"
+        ]
+    },
+    {
+        "question": "What are the precise length, width, and height dimensions of the StarEra ES9, and what is its wheelbase?",
+        "reference_answer": "The StarEra ES9 measures 5130 mm in length, 1980 mm in width, and 1780 mm in height, with a wheelbase of 3070 mm.",
+        "key_facts": [
+            "5130 mm",
+            "1980 mm",
+            "1780 mm",
+            "3070 mm",
+            "ES9"
+        ]
+    },
+    {
+        "question": "What is the maximum DC fast charging power supported by the StarEra ES9, and how long does it take to charge from 10% to 80%?",
+        "reference_answer": "The StarEra ES9 supports DC fast charging up to 180 kW, enabling a 10% to 80% charge in approximately 24 minutes.",
+        "key_facts": [
+            "180 kW",
+            "24 minutes",
+            "10% to 80%",
+            "ES9"
+        ]
+    },
+    {
+        "question": "What is the 0-100 km/h acceleration time for the dual-motor, all-wheel-drive version of the Xiaomi SU7 Max?",
+        "reference_answer": "The dual-motor all-wheel-drive Xiaomi SU7 Max accelerates from 0 to 100 km/h in 2.78 seconds.",
+        "key_facts": [
+            "2.78 seconds",
+            "0-100 km/h",
+            "SU7 Max",
+            "dual-motor"
+        ]
+    },
+    {
+        "question": "What is the combined peak power output of the dual motors in the top-performance variant of the Xiaomi SU7?",
+        "reference_answer": "The top-performance variant of the Xiaomi SU7 features dual motors with a combined peak power output of 495 kW.",
+        "key_facts": [
+            "495 kW",
+            "peak power",
+            "dual motors",
+            "SU7"
+        ]
+    },
+    {
+        "question": "What is the maximum voltage platform of the Xiaomi SU7, and what is its claimed peak charging rate in km of range gained per minute?",
+        "reference_answer": "The Xiaomi SU7 utilizes an 871V high-voltage platform and claims a peak charging rate of up to 220 km of CLTC range gained per 5 minutes.",
+        "key_facts": [
+            "871V",
+            "220 km",
+            "5 minutes",
+            "charging rate",
+            "SU7"
+        ]
+    },
+    {
+        "question": "Which vehicle, the StarEra ES9 or the Xiaomi SU7, offers a longer maximum CLTC range, and what are the respective figures?",
+        "reference_answer": "The StarEra ES9 has a longer maximum CLTC range. The ES9 offers 720 km, while the Xiaomi SU7 Max offers up to 800 km (or 810 km with specific tires).",
+        "key_facts": [
+            "ES9",
+            "720 km",
+            "SU7",
+            "800 km",
+            "810 km",
+            "CLTC range"
+        ]
+    },
+    {
+        "question": "Compare the intelligent driving system chips used in the StarEra ES9 and the Xiaomi SU7. Which specific chips do they use?",
+        "reference_answer": "The StarEra ES9 uses the Nvidia Orin-X chip for its intelligent driving system. The Xiaomi SU7 uses two Nvidia Orin-X chips.",
+        "key_facts": [
+            "ES9",
+            "Nvidia Orin-X",
+            "SU7",
+            "two Nvidia Orin-X"
+        ]
+    },
+    {
+        "question": "Which car has a higher top speed, the StarEra ES9 or the Xiaomi SU7, and what are their respective top speeds?",
+        "reference_answer": "The Xiaomi SU7 has a higher top speed. The SU7 can reach 265 km/h, while the StarEra ES9 has a top speed of 200 km/h.",
+        "key_facts": [
+            "SU7",
+            "265 km/h",
+            "ES9",
+            "200 km/h",
+            "top speed"
+        ]
+    },
+    {
+        "question": "Compare the passenger seating capacity and configuration of the StarEra ES9 and the Xiaomi SU7.",
+        "reference_answer": "The StarEra ES9 is a 6/7-seater SUV, typically configured with three rows of seats. The Xiaomi SU7 is a 5-seater sedan with two rows of seats.",
+        "key_facts": [
+            "ES9",
+            "6/7-seater",
+            "SUV",
+            "SU7",
+            "5-seater",
+            "sedan"
+        ]
+    }
+]

@@ -4,3 +4,4 @@ langchain-community
 pymysql
 python-dotenv
 supabase
+pdf2image
