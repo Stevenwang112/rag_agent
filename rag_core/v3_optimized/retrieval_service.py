@@ -1,6 +1,8 @@
 import os
 import time
 import logging
+import json
+import re
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from dotenv import load_dotenv
@@ -13,7 +15,7 @@ from supabase import create_client, Client
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Load env vars once at module level, but validate in class
+# Load env vars
 load_dotenv()
 
 @dataclass
@@ -23,11 +25,12 @@ class RetrievalConfig:
     sparse_weight: float = 0.3
     rerank_retrieval_weight: float = 0.3
     rerank_llm_weight: float = 0.7
-    max_rerank_workers: int = 10
+    # Batch size for Listwise reranking (Optimization)
+    ranking_batch_size: int = 10  
     llm_model: str = "deepseek-chat"
     embedding_model: str = "models/text-embedding-004"
 
-class RetrievalService:
+class RetrievalServiceV3:
     def __init__(self, config: Optional[RetrievalConfig] = None):
         self.config = config or RetrievalConfig()
         
@@ -35,7 +38,6 @@ class RetrievalService:
         self.supabase_url = os.environ.get("SUPABASE_URL")
         self.supabase_key = os.environ.get("SUPABASE_SERVICE_KEY") 
         self.deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
-        # Implicit for Google Embeddings, but good to check if explicity needed usually validation logic differs
         self.google_api_key = os.environ.get("GOOGLE_API_KEY") 
 
         if not all([self.supabase_url, self.supabase_key, self.deepseek_key]):
@@ -45,6 +47,7 @@ class RetrievalService:
         try:
             self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
             self.embeddings = GoogleGenerativeAIEmbeddings(model=self.config.embedding_model)
+            # Use JSON mode if available, but DeepSeek Chat handles clear instructions well
             self.llm_reranker = ChatOpenAI(
                 model=self.config.llm_model,
                 openai_api_key=self.deepseek_key,
@@ -57,13 +60,9 @@ class RetrievalService:
 
     @staticmethod
     def normalize_scores(scores: List[float]) -> List[float]:
-        """
-        Min-Max normalization.
-        """
-        if not scores:
-            return []
-        if len(scores) == 1:
-            return [1.0]
+        """Min-Max normalization."""
+        if not scores: return []
+        if len(scores) == 1: return [1.0]
         
         min_s = min(scores)
         max_s = max(scores)
@@ -73,31 +72,68 @@ class RetrievalService:
             
         return [(s - min_s) / (max_s - min_s) for s in scores]
 
-    def _get_llm_relevance_score(self, query: str, content: str) -> float:
+    def _get_llm_batch_scores(self, query: str, docs: List[Dict]) -> Dict[int, float]:
         """
-        Uses DeepSeek to score relevance (0-100).
+        Uses DeepSeek to score a BATCH of documents (Listwise Reranking).
+        Significant optimization over Pointwise (V2).
         """
-        prompt = f"""You are a relevance ranking assistant. 
-Query: {query}
-Document: {content[:2000]}...
-Rate the relevance of the document to the query on a scale of 0 to 100.
-0 means irrelevant, 100 means exact answer.
-Output ONLY the number.
+        if not docs:
+            return {}
+
+        formatted_docs = ""
+        for i, doc in enumerate(docs):
+            # Limit content length to avoid massive context
+            content_preview = doc['parent_content'][:800].replace("\n", " ") 
+            formatted_docs += f"[ID: {i}]\nContent: {content_preview}\n\n"
+
+        prompt = f"""You are a relevance ranking assistant.
+I will provide a Query and a list of {len(docs)} Document Snippets (ID: 0 to {len(docs)-1}).
+Your task is to rate the relevance of EACH document to the query on a scale of 0 to 100.
+
+Query: "{query}"
+
+Documents:
+{formatted_docs}
+
+INSTRUCTIONS:
+1. Analyze each document's content against the query.
+2. Assign a score (0-100). 0=Irrelevant, 100=Exact Answer.
+3. Return a valid JSON object mapping ID (string) to Score (number).
+4. No other text.
+
+Example Output:
+{{"0": 15, "1": 85, "2": 0}}
 """
         try:
             response = self.llm_reranker.invoke(prompt)
-            score_str = response.content.strip()
-            import re
-            match = re.search(r'\d+(\.\d+)?', score_str)
-            if match:
-                return float(match.group())
-            return 0.0
+            content = response.content.replace("```json", "").replace("```", "").strip()
+            
+            # Parse JSON
+            scores_map = json.loads(content)
+            
+            # Convert keys to int and values to float
+            final_scores = {}
+            for k, v in scores_map.items():
+                try:
+                    # Map back to original index in this batch
+                    final_scores[int(k)] = float(v)
+                except:
+                    continue
+            
+            # Fill missing with 0
+            for i in range(len(docs)):
+                if i not in final_scores:
+                    final_scores[i] = 0.0
+            
+            return final_scores
+
         except Exception as e:
-            logger.warning(f"Reranker LLM call failed: {e}")
-            return 0.0
+            logger.warning(f"Batch Reranking failed: {e}")
+            # Fallback: return 0s
+            return {i: 0.0 for i in range(len(docs))}
 
     def search(self, query: str, product_filter: str = None) -> str:
-        logger.info(f"Searching for: {query} (Filter: {product_filter})")
+        logger.info(f"V3 Optimized Searching for: {query} (Filter: {product_filter})")
         
         # 1. Vectorize
         try:
@@ -121,6 +157,7 @@ Output ONLY the number.
         }
         
         try:
+            # Reusing the existing RPC function from V2
             results = self.supabase.rpc("match_parent_chunks_hybrid", params).execute()
             chunks = results.data
         except Exception as e:
@@ -142,33 +179,51 @@ Output ONLY the number.
                 unique_pages[pid] = {
                     "parent_content": chunk['parent_content'],
                     "metadata": chunk['metadata'],
-                    "retrieval_score": score
+                    "retrieval_score": score,
+                    "id": pid
                 }
             else:
                 if score > unique_pages[pid]["retrieval_score"]:
                     unique_pages[pid]["retrieval_score"] = score
         
-        pages_list = [{"id": pid, **data} for pid, data in unique_pages.items()]
+        pages_list = list(unique_pages.values())
         logger.info(f"Deduplicated to {len(pages_list)} unique pages.")
 
-        # 4. LLM Reranking
+        # 4. LLM Reranking (Batch Mode - OPTIMIZED)
         retrieval_scores = [p['retrieval_score'] for p in pages_list]
         norm_retrieval_scores = self.normalize_scores(retrieval_scores)
         
-        logger.info(f"Reranking {len(pages_list)} pages with DeepSeek...")
+        logger.info(f"Reranking {len(pages_list)} pages with DeepSeek (Batch Size: {self.config.ranking_batch_size})...")
         llm_raw_scores = [0.0] * len(pages_list)
+        
+        # Split into batches
+        batches = [pages_list[i:i + self.config.ranking_batch_size] 
+                   for i in range(0, len(pages_list), self.config.ranking_batch_size)]
         
         import concurrent.futures
         
-        def score_task(index, page):
-            s = self._get_llm_relevance_score(query, page['parent_content'])
-            return index, s
+        def process_batch(batch_idx, batch_docs):
+            start_idx = batch_idx * self.config.ranking_batch_size
+            scores_map = self._get_llm_batch_scores(query, batch_docs)
+            return start_idx, scores_map
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.max_rerank_workers) as executor:
-            future_to_idx = {executor.submit(score_task, i, p): i for i, p in enumerate(pages_list)}
-            for future in concurrent.futures.as_completed(future_to_idx):
-                idx, score = future.result()
-                llm_raw_scores[idx] = score
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_batch = {
+                executor.submit(process_batch, i, batch): i 
+                for i, batch in enumerate(batches)
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_batch):
+                batch_idx = future_to_batch[future]
+                try:
+                    start_global_idx, scores_map = future.result()
+                    # Map batch-local indices to global indices
+                    for local_idx, score in scores_map.items():
+                        global_idx = start_global_idx + local_idx
+                        if global_idx < len(llm_raw_scores):
+                            llm_raw_scores[global_idx] = score
+                except Exception as exc:
+                    logger.error(f"Batch {batch_idx} generated an exception: {exc}")
 
         norm_llm_scores = self.normalize_scores(llm_raw_scores)
 
@@ -195,16 +250,10 @@ Output ONLY the number.
             
         return "\n".join(output_parts)
 
-# Helper for V2 Agent compatibility
-def retrieve_and_rerank(query: str, product_filter: str = None) -> str:
-    service = RetrievalService()
-    return service.search(query, product_filter)
-
 if __name__ == "__main__":
-    # Test V3
     try:
-        service = RetrievalService()
-        q = "ES9的电池续航是多少？标准版和性能版有什么区别？"
+        service = RetrievalServiceV3()
+        q = "ES9的电池续航是多少？"
         print(service.search(q))
     except Exception as e:
         print(f"Test failed: {e}")
