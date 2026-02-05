@@ -21,10 +21,13 @@ load_dotenv()
 @dataclass
 class RetrievalConfig:
     match_count: int = 30
-    dense_weight: float = 0.7
-    sparse_weight: float = 0.3
+    rrf_k: int = 60
+    # Weights for final: Just LLM dominating, but we keep the config clean
+    # For Pure LLM Listwise, we can set LLM weight to 1.0 or keep hybrid
+    # Let's keep a small Retrieval weight for stability, or 1.0 LLM as per "Optimized" goal
     rerank_retrieval_weight: float = 0.3
     rerank_llm_weight: float = 0.7
+    
     # Batch size for Listwise reranking (Optimization)
     ranking_batch_size: int = 10  
     llm_model: str = "deepseek-chat"
@@ -47,7 +50,8 @@ class RetrievalServiceV3:
         try:
             self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
             self.embeddings = GoogleGenerativeAIEmbeddings(model=self.config.embedding_model)
-            # Use JSON mode if available, but DeepSeek Chat handles clear instructions well
+            
+            # DeepSeek LLM for Listwise Reranking
             self.llm_reranker = ChatOpenAI(
                 model=self.config.llm_model,
                 openai_api_key=self.deepseek_key,
@@ -133,7 +137,7 @@ Example Output:
             return {i: 0.0 for i in range(len(docs))}
 
     def search(self, query: str, product_filter: str = None) -> str:
-        logger.info(f"V3 Optimized Searching for: {query} (Filter: {product_filter})")
+        logger.info(f"V3 Optimized Searching for: {query} (Filter: {product_filter}) [Strategy: RRF + LLM Listwise]")
         
         # 1. Vectorize
         try:
@@ -142,7 +146,7 @@ Example Output:
             logger.error(f"Embedding failed: {e}")
             return f"Error generating embedding: {e}"
 
-        # 2. Retrieve (Hybrid)
+        # 2. Retrieve (Hybrid RRF)
         filter_dict = {}
         if product_filter:
             filter_dict = {"company_name": product_filter}
@@ -151,36 +155,35 @@ Example Output:
             "query_embedding": query_vector,
             "query_text": query, 
             "match_count": self.config.match_count,
-            "dense_weight": self.config.dense_weight, 
-            "sparse_weight": self.config.sparse_weight,
+            "rrf_k": self.config.rrf_k,
             "filter": filter_dict
         }
         
         try:
-            # Reusing the existing RPC function from V2
-            results = self.supabase.rpc("match_parent_chunks_hybrid", params).execute()
+            results = self.supabase.rpc("match_parent_chunks_rrf", params).execute()
             chunks = results.data
         except Exception as e:
-            logger.error(f"Supabase RPC failed: {e}")
+            logger.error(f"Supabase RPC (RRF) failed: {e}")
             return f"Database Error: {e}"
 
         if not chunks:
             return "No relevant documents found."
 
-        logger.info(f"Found {len(chunks)} raw chunks.")
+        logger.info(f"Found {len(chunks)} raw chunks via RRF.")
 
         # 3. Deduplicate Pages
         unique_pages = {}
         for chunk in chunks:
             pid = chunk['parent_id']
-            score = chunk['similarity'] 
+            # Map RRF score (kept for reference, low weight)
+            score = chunk['rrf_score']
             
             if pid not in unique_pages:
                 unique_pages[pid] = {
                     "parent_content": chunk['parent_content'],
                     "metadata": chunk['metadata'],
                     "retrieval_score": score,
-                    "id": pid
+                    "page_source": chunk['metadata'].get('page_source', '?')
                 }
             else:
                 if score > unique_pages[pid]["retrieval_score"]:
@@ -189,45 +192,45 @@ Example Output:
         pages_list = list(unique_pages.values())
         logger.info(f"Deduplicated to {len(pages_list)} unique pages.")
 
-        # 4. LLM Reranking (Batch Mode - OPTIMIZED)
-        retrieval_scores = [p['retrieval_score'] for p in pages_list]
-        norm_retrieval_scores = self.normalize_scores(retrieval_scores)
-        
-        logger.info(f"Reranking {len(pages_list)} pages with DeepSeek (Batch Size: {self.config.ranking_batch_size})...")
+        # 4. LLM Listwise Reranking (DeepSeek)
+        logger.info(f"Running LLM Listwise Reranking on {len(pages_list)} pages...")
         llm_raw_scores = [0.0] * len(pages_list)
         
-        # Split into batches
         batches = [pages_list[i:i + self.config.ranking_batch_size] 
                    for i in range(0, len(pages_list), self.config.ranking_batch_size)]
         
         import concurrent.futures
         
-        def process_batch(batch_idx, batch_docs):
+        def process_llm_batch(batch_idx, batch_docs):
             start_idx = batch_idx * self.config.ranking_batch_size
             scores_map = self._get_llm_batch_scores(query, batch_docs)
             return start_idx, scores_map
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             future_to_batch = {
-                executor.submit(process_batch, i, batch): i 
+                executor.submit(process_llm_batch, i, batch): i 
                 for i, batch in enumerate(batches)
             }
-            
             for future in concurrent.futures.as_completed(future_to_batch):
                 batch_idx = future_to_batch[future]
                 try:
                     start_global_idx, scores_map = future.result()
-                    # Map batch-local indices to global indices
                     for local_idx, score in scores_map.items():
                         global_idx = start_global_idx + local_idx
                         if global_idx < len(llm_raw_scores):
                             llm_raw_scores[global_idx] = score
                 except Exception as exc:
-                    logger.error(f"Batch {batch_idx} generated an exception: {exc}")
+                    logger.error(f"LLM Batch {batch_idx} exception: {exc}")
 
         norm_llm_scores = self.normalize_scores(llm_raw_scores)
+        
+        # 5. Final Score Fusion
+        # We don't normalize RRF scores heavily to let LLM dominate
+        # But we still use the helper. 
+        # Actually, let's normalize RRF too otherwise 0.1 * 0.03 is invisible.
+        retrieval_scores = [p['retrieval_score'] for p in pages_list]
+        norm_retrieval_scores = self.normalize_scores(retrieval_scores)
 
-        # 5. Final Score
         final_results = []
         for i, page in enumerate(pages_list):
             final_score = (self.config.rerank_retrieval_weight * norm_retrieval_scores[i]) + \
@@ -235,8 +238,9 @@ Example Output:
             
             final_results.append({
                 "content": page['parent_content'],
-                "page_num": page['metadata'].get('page_source', '?'),
-                "score": final_score
+                "page_num": page['page_source'],
+                "score": final_score,
+                "llm_raw": llm_raw_scores[i]
             })
         
         final_results.sort(key=lambda x: x['score'], reverse=True)
@@ -245,10 +249,18 @@ Example Output:
         # 6. Format Output
         output_parts = []
         for i, item in enumerate(top_10):
-            header = f"--- Result {i+1} (Page {item['page_num']}, Score: {item['score']:.4f}) ---"
+            header = f"--- Result {i+1} (Page {item['page_num']}, Score: {item['score']:.4f} [LLM:{item['llm_raw']:.0f}]) ---"
             output_parts.append(f"{header}\n{item['content']}\n")
             
         return "\n".join(output_parts)
+    
+if __name__ == "__main__":
+    try:
+        service = RetrievalServiceV3()
+        q = "ES9的电池续航是多少？标准版和性能版有什么区别？"
+        print(service.search(q))
+    except Exception as e:
+        print(f"Test failed: {e}")
 
 if __name__ == "__main__":
     try:
